@@ -74,7 +74,7 @@ verify_bitmap_entry(struct vea_free_bitmap *vfb)
 
 /**
  * Check if current extent is adjacent with next one.
- * returns	1 - Adjacent
+ * returns	1 - Adjacent 判断是否毗连
  *		0 - Not adjacent
  *		-DER_INVAL - Overlapping or @cur is behind of @next
  */

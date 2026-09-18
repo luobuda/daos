@@ -135,13 +135,13 @@ vea_format(struct umem_instance *umem, struct umem_tx_stage_data *txd, struct ve
 	D_ASSERT(umem != NULL);
 	D_ASSERT(md != NULL);
 	/* Can't reformat without 'force' specified */
-	if (md->vsd_magic == VEA_MAGIC) {
+	if (md->vsd_magic == VEA_MAGIC) { // VEA已经存在
 		D_CDEBUG(force, DLOG_WARN, DLOG_ERR, "reformat %p force=%d\n",
 			 md, force);
 		if (!force)
 			return -DER_EXIST;
 
-		erase_md(umem, md);
+		erase_md(umem, md); // 销毁VEA
 	}
 
 	/* Block size should be aligned with 4K and <= 1M */
@@ -151,7 +151,7 @@ vea_format(struct umem_instance *umem, struct umem_tx_stage_data *txd, struct ve
 	if (hdr_blks < 1)
 		return -DER_INVAL;
 
-	blk_sz = blk_sz ? : VEA_BLK_SZ;
+	blk_sz = blk_sz ? blk_sz : VEA_BLK_SZ; // blk_sz默认4k
 	if (capacity < (blk_sz * 100))
 		return -DER_NOSPACE;
 
@@ -177,7 +177,7 @@ vea_format(struct umem_instance *umem, struct umem_tx_stage_data *txd, struct ve
 		 */
 		D_ASSERT(umem_tx_none(umem));
 
-		rc = cb(cb_data);
+		rc = cb(cb_data); // 将bio_blob_hdr写入nvme的offset=0位置
 		if (rc != 0)
 			return rc;
 	}
@@ -194,9 +194,9 @@ vea_format(struct umem_instance *umem, struct umem_tx_stage_data *txd, struct ve
 	md->vsd_magic = VEA_MAGIC;
 	/* Todo only enable bitmap for large pool size */
 	md->vsd_compat = compat & VEA_COMPAT_MASK;
-	md->vsd_blk_sz = blk_sz;
-	md->vsd_tot_blks = tot_blks;
-	md->vsd_hdr_blks = hdr_blks;
+	md->vsd_blk_sz = blk_sz; // 块大小默认4k
+	md->vsd_tot_blks = tot_blks; // 总块数
+	md->vsd_hdr_blks = hdr_blks; // superblock头大小
 
 	/* Create free extent tree */
 	uma.uma_id = umem->umm_id;
@@ -206,8 +206,8 @@ vea_format(struct umem_instance *umem, struct umem_tx_stage_data *txd, struct ve
 	if (rc != 0)
 		goto out;
 
-	/* Insert the initial free extent */
-	free_ext.vfe_blk_off = hdr_blks;
+	/* Insert the initial free extent 初始只有一个extent*/
+	free_ext.vfe_blk_off = hdr_blks; // 0~hdr_blks写入bio_blob_hdr
 	free_ext.vfe_blk_cnt = tot_blks;
 	free_ext.vfe_age = 0;	/* Not used */
 
@@ -394,10 +394,10 @@ need_aging_flush(struct vea_space_info *vsi, bool force)
 			break;
 		}
 	}
-
+	// 没有空闲的bitmap也没有空闲的agg lur列表，不需要flush
 	if (!empty_bitmap && d_list_empty(&vsi->vsi_agg_lru))
 		return false;
-
+	// flush间隔小于5s，跳过flush
 	if (!force && get_current_age() < (vsi->vsi_flush_time + FLUSH_INTVL))
 		return false;
 
@@ -413,6 +413,10 @@ inline_aging_flush(struct vea_space_info *vsi, bool force, uint32_t nr_flush, ui
 		*nr_flushed = 0;
 
 	/* Don't do inline flush when external flush is specified */
+	/* Instead of triggering aging frags flush in vea_reserve() and vea_free()
+       internally, using a dedicated ULT to do flush externally
+	*/
+	/* 通过flush_ult后台flush，不在每个io路径执行flush，条件恒成立 */
 	if (vsi->vsi_unmap_ctxt.vnc_ext_flush)
 		return;
 
@@ -436,6 +440,24 @@ inline_aging_flush(struct vea_space_info *vsi, bool force, uint32_t nr_flush, ui
  * 3. Try to reserve from some small free extent (<= VEA_LARGE_EXT_MB) in best-fit,
  *    if it fails, reserve from the largest free extent. (lookup vfc_size_btr)
  * 4. Fail reserve with ENOMEM if all above attempts fail.
+ * 
+ * data_thresh 默认 4KB，所以 4KB 及以上的
+  value 就落 NVMe，blk_cnt = size / 4K：
+
+  ┌───────┬─────────┬───────────────────┐
+  │ value │ blk_cnt │      走哪条       │
+  │  大小 │         │                   │
+  ├───────┼─────────┼───────────────────┤
+  │ 4K ~  │ 1 ~ 64  │ bitmap（try_hint  │
+  │ 256K  │         │ = false）         │
+  ├───────┼─────────┼───────────────────┤
+  │ 260K  │ 65 ~    │ size tree +       │
+  │ ~ 64M │ 16384   │ stream hint       │
+  ├───────┼─────────┼───────────────────┤
+  │ > 64M │ —       │ heap              │
+  └───────┴─────────┴───────────────────┘
+  DAOS 典型的 record 是 4K/8K/16K/64K/128K，
+  所以对记录级随机读写，几乎全部落在bitmap 里
  */
 int
 vea_reserve(struct vea_space_info *vsi, uint32_t blk_cnt,
@@ -450,6 +472,7 @@ vea_reserve(struct vea_space_info *vsi, uint32_t blk_cnt,
 	D_ASSERT(vsi != NULL);
 	D_ASSERT(resrvd_list != NULL);
 
+	// 小于256K时
 	if (is_bitmap_feature_enabled(vsi) && blk_cnt <= VEA_MAX_BITMAP_CLASS)
 		try_hint = false;
 
@@ -462,12 +485,13 @@ vea_reserve(struct vea_space_info *vsi, uint32_t blk_cnt,
 
 	/* Get hint offset */
 	if (try_hint)
+		/* 分配前：读当前 hint 偏移，vre_hint_off = 分配前的 hint 位置 */
 		hint_get(hint, &resrvd->vre_hint_off);
 
 	/* Trigger aging extents flush */
 	inline_aging_flush(vsi, force, MAX_FLUSH_FRAGS, NULL);
 retry:
-	/* Reserve from hint offset */
+	/* Reserve from hint offset 大块直接从vsi_free_btr分配 */
 	if (try_hint) {
 		rc = reserve_hint(vsi, blk_cnt, resrvd);
 		if (rc != 0)
@@ -497,11 +521,14 @@ done:
 	D_ASSERT(resrvd->vre_blk_cnt == blk_cnt);
 
 	/* Update hint offset if allocation is from extent */
-	if (resrvd->vre_private) {
+	if (resrvd->vre_private) { // bitmap的hint更新在reserve_bitmap_chunk
 		dec_stats(vsi, STAT_FREE_BITMAP_BLKS, blk_cnt);
 	} else {
 		dec_stats(vsi, STAT_FREE_EXTENT_BLKS, blk_cnt);
 		D_ASSERT(resrvd->vre_blk_off != VEA_HINT_OFF_INVAL);
+		// 更新内存的hint，持久化的hint在hint_tx_publish更新
+		/* 分配后（done 分支）：推进 hint 并把新序号带出来
+			resrvd->vre_hint_seq = 本次分配的序号*/
 		hint_update(hint, resrvd->vre_blk_off + blk_cnt,
 			    &resrvd->vre_hint_seq);
 	}
@@ -519,7 +546,7 @@ process_free_entry(struct vea_space_info *vsi, struct vea_free_entry *vfe, bool 
 {
 	uint32_t expected_type = vfe->vfe_bitmap ? VEA_FREE_ENTRY_BITMAP : VEA_FREE_ENTRY_EXTENT;
 
-	if (!publish) {
+	if (!publish) { // 回滚
 		int type = free_type(vsi, vfe->vfe_ext.vfe_blk_off, vfe->vfe_ext.vfe_blk_cnt, NULL);
 
 		if (type < 0)
@@ -577,28 +604,29 @@ process_resrvd_list(struct vea_space_info *vsi, struct vea_hint_context *hint,
 		if (resrvd->vre_new_bitmap_chunk) {
 			D_ASSERT(bitmap_entry != NULL);
 			D_ASSERT(entry_type == VEA_FREE_ENTRY_BITMAP);
-			if (bitmap_seq_min == 0) {
+			if (bitmap_seq_min == 0) { // hint来自vsi_bitmap_hint_context
 				bitmap_seq_min = resrvd->vre_hint_seq;
 				bitmap_off_c = resrvd->vre_hint_off;
 			} else {
 				D_ASSERT(bitmap_seq_min < resrvd->vre_hint_seq);
 			}
-			bitmap_seq_cnt++;
+			bitmap_seq_cnt++; // 本bitmap批次实际有几条reservation
 			bitmap_seq_max = resrvd->vre_hint_seq;
 			bitmap_off_p = resrvd->vre_blk_off + bitmap_entry->vbe_bitmap.vfb_blk_cnt;
 		} else if (entry_type == VEA_FREE_ENTRY_EXTENT) {
-			if (seq_min == 0) {
+			if (seq_min == 0) { // hint来自vc_hint_ctxt[VOS_IOS_CNT]
 				seq_min = resrvd->vre_hint_seq;
 				off_c = resrvd->vre_hint_off;
 			} else if (hint != NULL) {
 				D_ASSERT(seq_min < resrvd->vre_hint_seq);
 			}
 
-			seq_cnt++;
+			seq_cnt++; // 本extent批次实际有几条reservation
 			seq_max = resrvd->vre_hint_seq;
 			off_p = resrvd->vre_blk_off + resrvd->vre_blk_cnt;
 		}
 
+		// bitmap区间紧挨着，更新vfe_blk_cnt即可，将bitmap紧挨着的区间一次process_free_entry
 		if (private == resrvd->vre_private &&
 		    vfe.vfe_ext.vfe_blk_off + vfe.vfe_ext.vfe_blk_cnt == resrvd->vre_blk_off) {
 			vfe.vfe_ext.vfe_blk_cnt += resrvd->vre_blk_cnt;
@@ -640,7 +668,7 @@ bitmap_publish:
 
 error:
 	d_list_for_each_entry_safe(resrvd, tmp, resrvd_list, vre_link) {
-		d_list_del_init(&resrvd->vre_link);
+		d_list_del_init(&resrvd->vre_link); // vea_reserve时分配的
 		D_FREE(resrvd);
 	}
 
@@ -731,12 +759,52 @@ schedule_aging_flush(struct vea_space_info *vsi)
  *
  * The just recent freed extents won't be visible for allocation instantly,
  * they will stay in vsi_agg_lru for a short period time, and being coalesced
- * with each other there.
+ * with each other there. 刚释放的extent需要等10s再合并到free_tree
  *
  * Expired free extents in the vsi_agg_lru will be migrated to the allocation
  * visible index (vsi_free_tree, vfc_heap or vfc_lrus) from time to time, this
  * kind of migration will be triggered by vea_reserve() & vea_free() calls.
  */
+
+/*
+  vea_free(blk_off, blk_cnt)
+    │
+    ├─ ① D_ALLOC_PTR(fca)  ← 零初始化，vfe_bitmap =
+  NULL
+    ├─ ② verify_free_entry(NULL, &vfe_ext)
+    ├─ ③ umem_tx_begin(umem, vsi_txd)
+  【事务开始】
+    │
+    ├─ ④ persistent_free(vsi, &fca->fca_vfe)
+  【持久先行】
+    │      ├─ free_type() 判定 A / B 世界
+    │      ├─ A: persistent_free_extent() →
+  vsi_md_free_btr（合并/插入/缩短）
+    │      └─ B: bitmap_set_range(vbe_md_bitmap,
+  clear=true) 清位
+    │      （全程 umem_tx_add_ptr 登记 undo
+  log；内存副本完全不动）
+    │
+    ├─ ⑤ 注册 ONCOMMIT 回调 free_commit_cb(fca)，fca
+  = NULL  ← 所有权移交
+    ├─ ⑥ umem_tx_commit(umem)
+  【事务提交】
+    │
+    └─ ⑦ ONCOMMIT 触发 free_commit_cb(noop=false)
+           └─ aggregated_free(vsi, &fca->fca_vfe)
+   【内存后行，且只是记账】
+                ├─ A: vsi_agg_btr + vsi_agg_lru
+                └─ B: vbe_agg_btr  + vsi_agg_lru
+           └─ D_FREE(fca)
+
+  …… 若干秒后（EXPIRE_INTVL = 10s / 外部 flush
+  ULT）……
+    flush_internal() → 先 unmap（≥1MB）→
+  compound_free()   【这时才真正可分配】
+         ├─ A: vsi_free_btr + vfc_heap / vfc_size_btr
+         └─ B: 清内存 vbe_bitmap 的 bit + 挂回
+  vfc_bitmap_lru / empty
+*/
 int
 vea_free(struct vea_space_info *vsi, uint64_t blk_off, uint32_t blk_cnt)
 {
@@ -767,6 +835,7 @@ vea_free(struct vea_space_info *vsi, uint64_t blk_off, uint32_t blk_cnt)
 		goto error;
 
 	/* Add the free extent in persistent free extent tree */
+	// 直接返回持久化tree
 	rc = persistent_free(vsi, &fca->fca_vfe);
 	if (rc)
 		goto done;

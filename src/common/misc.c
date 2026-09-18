@@ -764,6 +764,13 @@ daos_hlc2timestamp(uint64_t hlc, time_t *ts)
 }
 
 /** Find requested number of unused bits (neither set it @used or @reserved */
+/*
+	used	已使用 bitmap，bit=1 表示 used
+	reserved	保留 bitmap，bit=1 表示 reserved；可以为 NULL
+	bmap_sz	bitmap 有多少个 uint64_t，不是多少 bit
+	bits_min	最少需要找到多少个连续 free bit
+	bits	输入：最多希望找到多少 bit；输出：实际找到多少 bit
+*/
 int
 daos_find_bits(uint64_t *used, uint64_t *reserved, int bmap_sz, int bits_min, int *bits)
 {
@@ -774,16 +781,16 @@ daos_find_bits(uint64_t *used, uint64_t *reserved, int bmap_sz, int bits_min, in
 	int	i;
 	int	j;
 
-	nr = nr_saved = 0;
-	at = at_saved = -1;
+	nr = nr_saved = 0;  // 当前连续 free bit 数量
+	at = at_saved = -1; // 当前连续 free region 起始位置
 
 	for (i = 0; i < bmap_sz; i++) {
-		uint64_t free_bits = ~used[i];
+		uint64_t free_bits = ~used[i]; // 1表示used，0表示free
 
 		if (reserved)
 			free_bits &= ~reserved[i];
 
-		if (free_bits == 0) { /* no space in the current int64 */
+		if (free_bits == 0) { /* 所有的bit都是used，no space in the current int64 */
 			if (nr > nr_saved) {
 				nr_saved = nr;
 				at_saved = at;
@@ -792,35 +799,36 @@ daos_find_bits(uint64_t *used, uint64_t *reserved, int bmap_sz, int bits_min, in
 			at = -1;
 			continue;
 		}
-
+		// 返回最低位第一个 1 的位置，从 1 开始计数
 		j = ffsll(free_bits);
 		D_ASSERT(j > 0);
+		// 跨uint64_t 64 bit时刚好下一个uint64_t第一个bit就是free 1
 		if (at >= 0 && j == 1) {
 			D_ASSERT(nr > 0);
-			nr++;
-		} else {
-			at = i * 64 + j - 1;
-			nr = 1;
+			nr++; // free bit++
+		} else { // 跨uint64_t 64 bit下一个uint64_t第一个bit是used的
+			at = i * 64 + j - 1; // 重新赋值free bit起始位置
+			nr = 1;              // 重新赋值连续free bit个数=1
 		}
 
 		for (; j < 64; j++) {
 			if (nr == *bits) /* done */
 				goto out;
 
-			if (isset64(&free_bits, j)) {
-				if (at < 0)
-					at = i * 64 + j;
+			if (isset64(&free_bits, j)) { // 判断第j个bit是否为1
+				if (at < 0) // 可能在for循环内被重置为-1
+					at = i * 64 + j; // 第一个bit已经在上面被处理，这里不用-1
 				nr++;
 				continue;
 			}
 
-			if (nr > nr_saved) {
+			if (nr > nr_saved) { // 找最大的连续free bit
 				nr_saved = nr;
 				at_saved = at;
 			}
-			nr = 0;
+			nr = 0; // 重置
 			at = -1;
-			if ((free_bits >> j) == 0)
+			if ((free_bits >> j) == 0) // 快速退出，没有为1的bit了
 				break;
 		}
 		if (nr == *bits)
@@ -840,6 +848,7 @@ daos_find_bits(uint64_t *used, uint64_t *reserved, int bmap_sz, int bits_min, in
 	return at_saved;
 }
 
+// 返回chunk的free bit个数
 int
 daos_count_free_bits(uint64_t *used, int bmap_sz)
 {
@@ -860,7 +869,7 @@ daos_count_free_bits(uint64_t *used, int bmap_sz)
 		for (; j < 64; j++) {
 			if (isset64(&free_bits, j))
 				nr++;
-			if ((free_bits >> j) == 0)
+			if ((free_bits >> j) == 0) // 快速退出，没有为1的bit了
 				break;
 		}
 	}

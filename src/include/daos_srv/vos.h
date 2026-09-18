@@ -968,18 +968,18 @@ vos_fetch_end(daos_handle_t ioh, daos_size_t *size, int err);
  * \param epoch	[IN]	Epoch for the update. Ignored if a DTX handle
  *			is provided.
  * \param flags [IN]	conditional flags
- * \param dkey	[IN]	Distribution key.
+ * \param dkey	[IN]	Distribution key.  dkey
  * \param iod_nr	[IN]	Number of I/O descriptors in \a iods.
- * \param iods	[IN]	Array of I/O descriptors.
+ * \param iods	[IN]	Array of I/O descriptors.  akey
  * \param iods	[IN]	Array of I/O descriptors. If \a flags includes
  *			VOS_OF_EC, then the iod_recxs field of every single
  *			value iod in \a iods must contain the "gsize" instead
  *			of a memory address.
- * \param iods_csums [IN]
+ * \param iods_csums [IN]   校验数据checksum
  *			Array of iod_csums (1 for each iod). Will be NULL
  *			if csums are disabled.
  * \param dedup_th [IN]	Deduplication threshold size
- * \param ioh	[OUT]	The returned handle for the I/O.
+ * \param ioh	[OUT]	The returned handle for the I/O. io上下文句柄vos_io_context
  * \param dth	[IN]	Pointer to the DTX handle.
  *
  * \return		Zero on success, negative value if error

@@ -2544,6 +2544,7 @@ heap_update_mbrt_zinfo(struct palloc_heap *heap)
 
 /*
  * heap_load_nonevictable_zones() -> Populate the heap with non-evictable MBs.
+ * 把所有"不可驱逐"的 zone 一次性读进来
  */
 int
 heap_load_nonevictable_zones(struct palloc_heap *heap)

@@ -33,6 +33,30 @@
 /* These Macros should be turned into DAOS configuration in the future */
 #define DAOS_MSG_RING_SZ	4096
 /* Default cluster size in MB */
+/*
+ cluster size大小影响：
+	block allocation 粒度
+	空间管理粒度
+	fragmentation
+	aggregation
+	NVMe I/O 粒度
+	空间利用率
+	metadata 管理
+	大量小对象/小写入场景
+
+SPDK Blobstore
+                 cluster 128 MiB
+                       │
+              ┌────────┴────────┐
+              │                 │
+          Blob extent       Blob extent
+              │                 │
+             VEA               VEA
+              │                 │
+          finer allocation / extent
+              │
+             4 KiB ...
+*/
 #define DAOS_DEFAULT_CLUSTER_MB 128
 /* DMA buffer parameters */
 #define DAOS_DMA_CHUNK_INIT_PCT 50      /* Default per-xstream init chunks, in percentage */
@@ -367,10 +391,11 @@ bio_nvme_init_ext(const char *nvme_conf, int numa_node, unsigned int mem_size,
 	if (cluster_mb < 32 || cluster_mb > 1024) {
 		D_WARN("DAOS_BS_CLUSTER_MB %u is invalid, default %u is used\n", cluster_mb,
 		       DAOS_DEFAULT_CLUSTER_MB);
-		cluster_mb = DAOS_DEFAULT_CLUSTER_MB;
+		cluster_mb = DAOS_DEFAULT_CLUSTER_MB; // 默认blob 128M
 	}
 	spdk_bs_opts_init(&nvme_glb.bd_bs_opts, sizeof(nvme_glb.bd_bs_opts));
 	nvme_glb.bd_bs_opts.cluster_sz      = (cluster_mb << 20);
+	// max_channel_ops (每通道最大并发操作数)
 	nvme_glb.bd_bs_opts.max_channel_ops = BIO_BS_MAX_CHANNEL_OPS;
 
 	d_agetenv_str(&env, "VOS_BDEV_CLASS");
@@ -524,6 +549,11 @@ bio_need_nvme_poll(struct bio_xs_context *ctxt)
 	return false;
 }
 
+/*
+	inflight io太多可能有stack overrun issue
+	超过2048主动spdk_thread_poll
+	超过4000循环spdk_thread_poll
+*/
 void
 drain_inflight_ios(struct bio_xs_context *ctxt, struct bio_xs_blobstore *bxb)
 {

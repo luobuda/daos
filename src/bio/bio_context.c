@@ -1242,14 +1242,23 @@ blob_unmap_sgl(struct bio_io_context *ioctxt, d_sg_list_t *unmap_sgl, uint32_t b
 		D_DEBUG(DB_IO, "Unmapping blob %p pgoff:"DF_U64" pgcnt:"DF_U64"\n",
 			ioctxt->bic_blob, pg_off, pg_cnt);
 
+		/*
+		void spdk_blob_io_unmap(
+			struct spdk_blob *blob,
+			struct spdk_io_channel *channel,
+			uint64_t offset,
+			uint64_t length,
+			spdk_blob_op_complete cb_fn,
+			void *cb_arg);
+		*/
 		spdk_blob_io_unmap(ioctxt->bic_blob, channel,
 				   page2io_unit(ioctxt, pg_off, blk_sz),
 				   page2io_unit(ioctxt, pg_cnt, blk_sz),
 				   blob_unmap_cb, &bma);
 	}
-	ba->bca_inflights--;
+	ba->bca_inflights--; // unmap io + 1
 
-	if (ba->bca_inflights > 0)
+	if (ba->bca_inflights > 0) // io未完成
 		blob_wait_completion(xs_ctxt, ba);
 	rc = ba->bca_rc;
 	ioctxt->bic_inflight_dmas--;
@@ -1286,6 +1295,7 @@ bio_blob_unmap_sgl(struct bio_io_context *ioctxt, d_sg_list_t *unmap_sgl, uint32
 	start_idx = 0;
 	while (tot_unmap_cnt > 0) {
 		unmap_cnt = min(tot_unmap_cnt, bio_spdk_max_unmap_cnt);
+		// 一次最大32
 
 		rc = blob_unmap_sgl(ioctxt, unmap_sgl, blk_sz, start_idx, unmap_cnt);
 		if (rc)

@@ -28,14 +28,75 @@
 #define VEA_BITMAP_MIN_CHUNK_BLKS	256				/* 1MiB */
 #define VEA_BITMAP_MAX_CHUNK_BLKS	(VEA_MAX_BITMAP_CLASS * 256)	/* 64 MiB */
 
+/*
+
+VEA按4k管理空间，偏移都是/4k的
+
+初始化
+ vos_pool_create_ex
+   - vea_format
+
+ pool_open_post
+   - vea_load
+
+vea_reserve() 从不单独使用——它必然配一个publish 或 cancel
+分配:  vea_reserve ──► [写数据] ──► vea_tx_publish (提交) / vea_cancel (中止)
+释放:  vea_free  (一步到位)  
+ 
+VEA空间申请
+ vos_update_begin： Prepare IO sink buffers
+   - vos_space_hold：当前空间使用情况，判断空间是否足够，不足直接DER_NOSPACE
+   - dkey_update_begin
+     - akey_update_begin
+	   - DAOS_IOD_SINGLE ——> vos_reserve_single -> reserve_space -> vos_reserve_blocks
+	   - DAOS_IOD_ARRAY ——> vos_reserve_recx -> vos_reserve_blocks
+	   
+	      - vos_reserve_blocks
+		    - vea_reserve
+			  - reserve_single
+
+ vos_update_end
+   - vos_tx_end
+     - vos_publish_blocks
+	   - vea_tx_publish
+	     - process_resrvd_list
+		   - process_free_entry
+	   - vea_cancel  # IO流程失败直接将空间返回给free
+  
+  
+VEA空间释放 agg，punch，discard，将是否空间插入agg tree
+
+svt_free_payload/evt_dop_bio_free
+  - vos_bio_addr_free
+    - vea_free 
+	
+agg tree ——> free tree
+  flush_ult
+     - vos_flush_pool
+	   - vea_flush
+	    - trigger_aging_flush
+	
+
+nvme空间释放
+vos_blob_unmap_cb
+  - bio_blob_unmap_sgl
+   - blob_unmap_sgl
+    - spdk_blob_io_unmap
+
+*/
 
 /* Common free bitmap structure for both SCM & in-memory index */
 struct vea_free_bitmap {
-	uint64_t	vfb_blk_off;				/* Block offset of the bitmap */
-	uint32_t	vfb_blk_cnt;				/* Block count of the bitmap */
-	uint16_t	vfb_class;				/* Allocation class of bitmap */
-	uint16_t	vfb_bitmap_sz;				/* Bitmap size*/
-	uint64_t	vfb_bitmaps[0];				/* Bitmaps of this chunk */
+	/* Block offset of the bitmap 当前chunk的起始偏移*/
+	uint64_t	vfb_blk_off;
+	/* Block count of the bitmap 当前chunk的4k blk大小*/		
+	uint32_t	vfb_blk_cnt;
+	/* Allocation class of bitmap 当前chunk负责分配的blk类型(区间大小)*/				
+	uint16_t	vfb_class;
+	/* Bitmap size 有多少个uint64_t*/
+	uint16_t	vfb_bitmap_sz;
+	/* Bitmaps of this chunk */			
+	uint64_t	vfb_bitmaps[0];				
 };
 
 /* Per I/O stream hint context */
@@ -55,17 +116,17 @@ struct vea_extent_entry {
 	 */
 	struct vea_free_extent	 vee_ext;
 	/* Link to one of vsc_extent_lru */
-	d_list_t		 vee_link;
+	d_list_t		 vee_link; // 插入的size tree节点链表
 	/* Back reference to sized tree entry */
-	struct vea_sized_class	*vee_sized_class;
+	struct vea_sized_class	*vee_sized_class; // 指向size tree节点
 	/* Link to vfc_heap */
-	struct d_binheap_node	 vee_node;
+	struct d_binheap_node	 vee_node; // heap节点
 };
 
 enum {
-	VEA_BITMAP_STATE_PUBLISHED,
-	VEA_BITMAP_STATE_PUBLISHING,
-	VEA_BITMAP_STATE_NEW,
+	VEA_BITMAP_STATE_PUBLISHED, // 已经插入到持久化树
+	VEA_BITMAP_STATE_PUBLISHING, // 正在插入持久化树
+	VEA_BITMAP_STATE_NEW,       // 新分配的chunk
 };
 
 /* Bitmap entry */
@@ -78,7 +139,7 @@ struct vea_bitmap_entry {
 	 * Free entries sorted by offset, for coalescing the just recent
 	 * free blocks inside this bitmap chunk.
 	 */
-	daos_handle_t		 vbe_agg_btr;
+	daos_handle_t		 vbe_agg_btr; // 最近释放的blocks按offset排序，方便聚合
 	/* Point to persistent free bitmap entry */
 	struct vea_free_bitmap	*vbe_md_bitmap;
 	/* free bitmap, always keep it as last item*/
@@ -105,7 +166,7 @@ struct vea_free_entry {
 /* Value entry of sized free extent tree (vfc_size_btr) */
 struct vea_sized_class {
 	/* Small extents LRU list */
-	d_list_t		vsc_extent_lru;
+	d_list_t		vsc_extent_lru; // 相同大小的Small extents用链表串起来
 };
 
 #define VEA_BITMAP_CHUNK_HINT_KEY	(~(0ULL))
@@ -117,13 +178,16 @@ struct vea_free_class {
 	/* Max heap for tracking the largest free extent */
 	struct d_binheap	vfc_heap;
 	/* Small free extent tree */
+	// 小的区间按照区间的blk_cnt作为key组织b+tree，相同区间的extent用链表串起来vea_sized_class
 	daos_handle_t		vfc_size_btr;
 	/* Size threshold for large extent */
-	uint32_t		vfc_large_thresh;
+	uint32_t		vfc_large_thresh; // 64M
 	/* Bitmap LRU list for different bitmap allocation class*/
-	d_list_t		vfc_bitmap_lru[VEA_MAX_BITMAP_CLASS];
+	// 1~64种blk cnt个数类型各一个链表，即256K以下的extent分配都优先用bitmap
+	d_list_t		vfc_bitmap_lru[VEA_MAX_BITMAP_CLASS]; // 这块 chunk是部分free的
 	/* Empty bitmap list for different allocation class */
-	d_list_t		vfc_bitmap_empty[VEA_MAX_BITMAP_CLASS];
+	d_list_t		vfc_bitmap_empty[VEA_MAX_BITMAP_CLASS]; // 这块chunk是全free的
+	// 一个chunk三种状态，新/全空（所有 bit 为 0）、用过一部分、还有空闲、已满（没有一个 bit 为 0）
 };
 
 enum {
@@ -161,6 +225,32 @@ struct vea_metrics {
 };
 
 #define MAX_FLUSH_FRAGS	256
+
+
+/*
+
+vsi_free_btr：部空闲 extent
+  键 / 序: vfe_blk_off
+
+vfc_heap: > vfc_large_thresh（默认64MB）的大 extent
+  键 / 序: max-heap by blk_cnt
+
+vfc_size_btr：<= 64MB 的小 extent，按精确大小分桶
+  键 / 序: 按blk_cnt个数 → struct vea_sized_class{vsc_extent_lru}
+
+vsi_free_btr = vfc_heap ⊎ vfc_size_btr ，三者是同一批vea_extent_entry对象的三个视图
+
+vsi_bitmap_btr（持久副本 vsi_md_bitmap_btr): 全部 bitmap
+  键 / 序: vfb_blk_off
+
+vfc_bitmap_lru[class-1]: 部分占用的 chunk
+  键 / 序: class 分桶
+
+vfc_bitmap_empty[class-1]: 全空的 chunk
+  键 / 序: class 分桶
+
+vsi_bitmap_btr = vfc_bitmap_lru ⊎ vfc_bitmap_empty
+*/
 
 /* In-memory compound index */
 struct vea_space_info {

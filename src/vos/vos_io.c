@@ -547,6 +547,7 @@ vos_ioc_reserve_init(struct vos_io_context *ioc, struct dtx_handle *dth)
 		daos_iod_t *iod = &ioc->ic_iods[i];
 
 		if (iod->iod_type == DAOS_IOD_SINGLE) {
+			// Large KV support，大value按8M拆分存储
 			gang_nr = vos_irec_gang_nr(ioc->ic_cont->vc_pool, iod->iod_size);
 			if (gang_nr > UINT8_MAX) {
 				D_ERROR("Too large SV:"DF_U64", gang_nr:%u\n",
@@ -619,7 +620,7 @@ vos_check_akeys(int iod_nr, daos_iod_t *iods)
 	if (iod_nr == 0)
 		return 0;
 
-	for (i = 0; i < iod_nr - 1; i++) {
+	for (i = 0; i < iod_nr - 1; i++) { // akey不能相同
 		for (j = i + 1; j < iod_nr; j++) {
 			if (iods[i].iod_name.iov_len != iods[j].iod_name.iov_len)
 				continue;
@@ -673,7 +674,7 @@ vos_ioc_create(daos_handle_t coh, daos_unit_oid_t oid, bool read_only,
 			 * writing akey twice in same operation is not allowed.
 			 */
 			rc = 0;
-			if (iod_nr != 1)
+			if (iod_nr != 1) // flat dkey模式去掉了akey tree，只保留一个akey
 				rc = -DER_NO_PERM;
 		} else {
 			rc = vos_check_akeys(iod_nr, iods);
@@ -689,7 +690,7 @@ vos_ioc_create(daos_handle_t coh, daos_unit_oid_t oid, bool read_only,
 		return -DER_NOMEM;
 
 	ioc->ic_io_size = 0;
-	ioc->ic_iod_nr = iod_nr;
+	ioc->ic_iod_nr = iod_nr; // akey个数
 	ioc->ic_iods = iods;
 	ioc->ic_epr.epr_hi = dtx_is_real_handle(dth) ? dth->dth_epoch : epoch;
 	bound              = dtx_is_real_handle(dth) ? dth->dth_epoch_bound : epoch;
@@ -2192,6 +2193,15 @@ vos_reserve_scm(struct vos_container *cont, struct umem_rsrvd_act *rsrvd_scm,
 	return umoff;
 }
 
+
+
+/*
+    cont: 容器
+	rsrvd_nvme：分配的nvme extent
+	size：需要分配的空间大小
+	ios：分配hint，是前台io，还是后台agg
+	off：分配的nvme blob extent起始偏移，后续spdk按照偏移写入
+*/
 int
 vos_reserve_blocks(struct vos_container *cont, d_list_t *rsrvd_nvme,
 		   daos_size_t size, enum vos_io_stream ios, uint64_t *off)
@@ -2208,7 +2218,7 @@ vos_reserve_blocks(struct vos_container *cont, d_list_t *rsrvd_nvme,
 	hint_ctxt = cont->vc_hint_ctxt[ios];
 	D_ASSERT(hint_ctxt);
 
-	blk_cnt = vos_byte2blkcnt(size);
+	blk_cnt = vos_byte2blkcnt(size); // 4k对齐计算4k块个数
 
 	rc = vea_reserve(vsi, blk_cnt, hint_ctxt, rsrvd_nvme);
 	if (rc)
@@ -2363,7 +2373,7 @@ vos_reserve_single(struct vos_io_context *ioc, uint16_t media, daos_size_t size)
 	struct dcs_csum_info	*value_csum = vos_csum_at(ioc->ic_iod_csums, ioc->ic_sgl_at);
 
 	gang_nr = vos_irec_gang_nr(ioc->ic_cont->vc_pool, size);
-	D_ASSERT(gang_nr <= UINT8_MAX);
+	D_ASSERT(gang_nr <= UINT8_MAX); // 最大<2G
 
 	rbund.rb_csum	= value_csum;
 	rbund.rb_rsize	= size;
@@ -2374,6 +2384,7 @@ vos_reserve_single(struct vos_io_context *ioc, uint16_t media, daos_size_t size)
 		scm_size += size;
 
 	/* Reserve SCM for SV meta record */
+	// 预留元数据空间
 	rc = reserve_space(ioc, DAOS_MEDIA_SCM, scm_size, &off);
 	if (rc) {
 		DL_ERROR(rc, "Reserve SCM for SV meta failed.");
@@ -2447,7 +2458,7 @@ vos_reserve_recx(struct vos_io_context *ioc, uint16_t media, daos_size_t size,
 		return rc;
 	}
 done:
-	bio_addr_set(&biov.bi_addr, media, off);
+	bio_addr_set(&biov.bi_addr, media, off); //  设置在nvme blob的偏移
 	bio_iov_set_len(&biov, size);
 	iod_reserve(ioc, &biov);
 
@@ -2467,7 +2478,7 @@ akey_update_begin(struct vos_io_context *ioc)
 		return -DER_IO_INVAL;
 	}
 
-	for (i = 0; i < iod->iod_nr; i++) {
+	for (i = 0; i < iod->iod_nr; i++) { // 遍历akey
 		daos_size_t size;
 		uint16_t media;
 
@@ -2758,11 +2769,11 @@ vos_update_begin(daos_handle_t coh, daos_unit_oid_t oid, daos_epoch_t epoch,
 	if (oid.id_shard % 3 == 1 && DAOS_FAIL_CHECK(DAOS_DTX_FAIL_IO))
 		return -DER_IO;
 
-	if (dtx_is_real_handle(dth))
+	if (dtx_is_real_handle(dth)) // 是分布式dtx
 		epoch = dth->dth_epoch;
 
 	if (dth && dth->dth_local)
-		++dth->dth_op_seq;
+		++dth->dth_op_seq; // 本地事务操作+1
 
 	D_DEBUG(DB_TRACE,
 		"Prepare IOC for " DF_UOID ", iod_nr %d, epc " DF_X64 ", flags=" DF_X64 "\n",
@@ -2789,6 +2800,7 @@ vos_update_begin(daos_handle_t coh, daos_unit_oid_t oid, daos_epoch_t epoch,
 	}
 
 	/* Hold the object for the evictable md-on-ssd phase2 pool */
+	// 将对象pin在内存，防止淘汰
 	if (vos_pool_is_evictable(vos_cont2pool(ioc->ic_cont))) {
 		rc = vos_obj_acquire(ioc->ic_cont, ioc->ic_oid, true, &ioc->ic_obj);
 		if (rc != 0)

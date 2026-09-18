@@ -190,6 +190,7 @@ vos_space_query(struct vos_pool *pool, struct vos_pool_space *vps, bool slow)
 	}
 
 	/* Query NVMe free space */
+	// 正常IO stat==NULL，
 	rc = vea_query(pool->vp_vea_info, attr, stat);
 	if (rc) {
 		D_ERROR("Query pool:"DF_UUID" NVMe space failed. "DF_RC"\n",
@@ -321,7 +322,7 @@ vos_space_hold(struct vos_pool *pool, uint64_t flags, daos_key_t *dkey,
 	if (flags & VOS_OF_REMOVE)
 		/* (1 EVT node + 1 EVT desc), a moderate estimation for removal */
 		space_est[DAOS_MEDIA_SCM] += (1024 + 256);
-	else
+	else // 估算本次写入大概需要的元数据和数据空间，方便接下来判断空间是否足够
 		estimate_space(pool, dkey, iod_nr, iods, iods_csums, &space_est[0]);
 
 	/* if this is a critical update or removal, skip SCM and NVMe sys/held checks */

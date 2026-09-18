@@ -994,6 +994,19 @@ static inline void vos_irec_init_csum(struct vos_irec_df *irec,
 	}
 }
 
+/*
+There are two known issues for large KV support:
+
+   1. Allocating large contiguous extent on SCM or NVMe isn’t practical, 
+      it very likely to fail due to SCM/NVMe fragmentations.
+
+   2. Allocating large contiguous DMA buffer (for mapping the large KV) isn’t practical,
+      it’s extremely slow to allocate large contiguous DMA buffer by spdk_dma_malloc() 
+	  (I measured 94MB large allocation from single xstream, it roughly takes ~50ms for
+	  each allocation, it’ll be much worse if the multiple xstreams do allocation 
+	  concurrently), and it also very likely to fail when the DMA buffer is fragmented.
+*/
+
 #define	VOS_GANG_SIZE_THRESH	(BIO_DMA_CHUNK_MB << 20)	/* 8MB */
 
 static inline unsigned int

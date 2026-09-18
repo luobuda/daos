@@ -440,7 +440,7 @@ struct bio_io_context {
 	struct bio_xs_blobstore	*bic_xs_blobstore;
 	struct bio_xs_context	*bic_xs_ctxt;
 	uint32_t		 bic_inflight_dmas;
-	uint32_t		 bic_io_unit;
+	uint32_t		 bic_io_unit; // bs_opts.io_unit_size spdk_bs_get_io_unit_size
 	uuid_t			 bic_pool_id;
 	unsigned int		 bic_opening:1,
 				 bic_closing:1,

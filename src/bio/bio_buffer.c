@@ -2010,7 +2010,7 @@ bio_io_monitor(struct bio_xs_context *xs_ctxt, uint64_t now)
 
 		if ((io_lug->bil_submit_ts + bio_io_timeout) >= now)
 			continue;
-
+		// spdk 120s没返回
 		D_ALLOC_PTR(mem);
 		if (mem == NULL) {
 			D_ERROR("Out of memory: NVMe stalled I/O report is skipped\n");

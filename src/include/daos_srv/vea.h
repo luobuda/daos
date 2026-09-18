@@ -28,7 +28,7 @@ struct vea_free_extent {
 };
 
 /* Reserved extent(s) */
-struct vea_resrvd_ext {
+struct vea_resrvd_ext { // 分配的空间
 	/* Link to a list for a series of vea_reserve() calls */
 	d_list_t		 vre_link;
 	/* Start block offset of the reserved extent */
@@ -44,7 +44,7 @@ struct vea_resrvd_ext {
 	/* Extent vector for non-contiguous reserve */
 	struct vea_ext_vector	*vre_vector;
 	/* private pointer */
-	void			*vre_private;
+	void			*vre_private; // bitmap才使用
 };
 
 /*
@@ -92,7 +92,7 @@ struct vea_space_df {
 	/* Block device capacity */
 	uint64_t	vsd_tot_blks;
 	/* Free extent tree, sorted by offset */
-	struct btr_root	vsd_free_tree;
+	struct btr_root	vsd_free_tree; // free区间树持久化根节点
 	/* Free bitmap tree, sorted by offset */
 	struct btr_root vsd_bitmap_tree;
 };

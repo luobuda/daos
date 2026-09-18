@@ -94,6 +94,7 @@ unload_space_info(struct vea_space_info *vsi)
 	}
 }
 
+// 从持久化存储中加载vea
 static int
 load_free_entry(daos_handle_t ih, d_iov_t *key, d_iov_t *val, void *arg)
 {
@@ -106,17 +107,17 @@ load_free_entry(daos_handle_t ih, d_iov_t *key, d_iov_t *val, void *arg)
 	off = (uint64_t *)key->iov_buf;
 	vfe = (struct vea_free_extent *)val->iov_buf;
 
-	rc = verify_free_entry(off, vfe);
+	rc = verify_free_entry(off, vfe); // key value的off匹配
 	if (rc != 0)
 		return rc;
-
+	// 插入vsi_free_btr同时分类到heap + size tree
 	rc = compound_free_extent(vsi, vfe, VEA_FL_NO_MERGE);
 	if (rc != 0)
 		return rc;
 
 	return 0;
 }
-
+// 从持久化存储中加载vea bitmap
 static int
 load_bitmap_entry(daos_handle_t ih, d_iov_t *key, d_iov_t *val, void *arg)
 {
@@ -128,20 +129,35 @@ load_bitmap_entry(daos_handle_t ih, d_iov_t *key, d_iov_t *val, void *arg)
 
 	vsi = (struct vea_space_info *)arg;
 	off = (uint64_t *)key->iov_buf;
-	if (*off == VEA_BITMAP_CHUNK_HINT_KEY)
+	if (*off == VEA_BITMAP_CHUNK_HINT_KEY) // 哨兵条目
 		return 0;
 
 	vfb = (struct vea_free_bitmap *)val->iov_buf;
 	rc = verify_bitmap_entry(vfb);
 	if (rc != 0)
 		return rc;
-
+	// 插入到vsi_bitmap_btr
 	rc = bitmap_entry_insert(vsi, vfb, VEA_BITMAP_STATE_PUBLISHED, &bitmap_entry, 0);
 	bitmap_entry->vbe_md_bitmap = vfb;
 
 	return rc;
 }
 
+/*
+ 纯 DRAM操作，它不负责从 NVMe 加载任何东西
+
+ 从 NVMe 把元数据搬进 DRAM 的工作，在dav_obj_open_v2() 里由两个阶段完成：
+  1. so_wal_replay —— 按 WAL 记录按需加载被改过的zone（顺带把增量重放上去）
+  2. heap_load_nonevictable_zones() ——一次性加载所有不可驱逐 zone（VEA的全部元数据都在其中）
+  VEA属于non-evictable MBs
+
+  持久状态 = 上次 checkpoint（meta blob）+
+  ▎ 之后的改动（WAL）。DRAM 是它的子集缓存，粒度zone(16MB)/page(4KB)：可驱逐 zone
+  ▎ 的页（含脏页，驱逐前先写回 meta blob）随时可不在内存，下次访问 fault-in；只有 NEMB
+  ▎ 上的分配和被 pin 的页必须常驻。因此 SSD 元数据 > DRAM 是设计前提，不需要（也不可能）把完整
+  ▎ checkpoint 装进内存。
+
+  */
 int
 load_space_info(struct vea_space_info *vsi)
 {
@@ -193,7 +209,7 @@ load_space_info(struct vea_space_info *vsi)
 	if (rc)
 		goto error;
 
-	df = (struct vea_hint_df *)val.iov_buf;
+	df = (struct vea_hint_df *)val.iov_buf; // 树上的地址，后续直接通过地址修改
 	rc = vea_hint_load(df, &vsi->vsi_bitmap_hint_context);
 	if (rc)
 		goto error;

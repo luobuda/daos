@@ -544,6 +544,8 @@ void  umempobj_log_fraginfo(struct umem_pool *pool);
 
 /** Number of flag bits to reserve for encoding extra information in
  *  a umem_off_t entry.
+ * 用地址的62-55 bit保存额外信息，方便处理，当前dtx_umoff_flag2type
+ * dtx标识ilog/sv/ev地址
  */
 #define UMOFF_NUM_FLAG_BITS	(8)
 /** The absolute value of a flag mask must be <= this value */
@@ -1011,6 +1013,7 @@ umem_tx_xadd_range(struct umem_instance *umm, umem_off_t umoff, uint64_t offset,
 		return 0;
 }
 
+// undo log我接下来要改这块内存，先给我存一份可回滚的快照
 static inline int
 umem_tx_add_ptr(struct umem_instance *umm, void *ptr, size_t size)
 {
